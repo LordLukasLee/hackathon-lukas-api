@@ -6,6 +6,7 @@ import json  # noqa: E402
 import logging  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import time  # noqa: E402
 import urllib.parse  # noqa: E402
 from typing import Literal  # noqa: E402
 
@@ -16,6 +17,10 @@ from pydantic import BaseModel  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- Ideas Cache (5 min TTL) ---
+IDEAS_CACHE: dict[str, tuple[list, float]] = {}  # company_id -> (ideas, timestamp)
+IDEAS_CACHE_TTL = 300  # 5 minutes in seconds
 
 # --- Image Style Presets ---
 IMAGE_STYLES = {
@@ -293,7 +298,7 @@ Target Audience: {target_audience}
 Brand Voice: {voice}
 Content Themes: {content_themes}
 
-Generate 5 specific, actionable content ideas that would resonate with our target audience. Each idea should be something we could post TODAY.
+Generate 3 specific, actionable content ideas that would resonate with our target audience. Each idea should be something we could post TODAY.
 
 Content types that perform well for B2B:
 - Customer success metrics ("How [client type] achieved X% improvement...")
@@ -311,10 +316,19 @@ IMPORTANT: Respond ONLY with valid JSON array. No markdown, no code blocks:
 
 
 @app.get("/ideas/{company_id}", response_model=IdeasResponse)
-async def get_content_ideas(company_id: str):
-    """Generate content ideas for a specific company using AI"""
+async def get_content_ideas(company_id: str, refresh: bool = False):
+    """Generate content ideas for a specific company using AI (cached for 5 min)"""
     if company_id not in COMPANIES:
         raise HTTPException(status_code=404, detail=f"Company '{company_id}' not found")
+
+    # Check cache first (unless refresh requested)
+    if not refresh and company_id in IDEAS_CACHE:
+        cached_ideas, cached_time = IDEAS_CACHE[company_id]
+        if time.time() - cached_time < IDEAS_CACHE_TTL:
+            logger.info(f"Returning cached ideas for {company_id}")
+            return IdeasResponse(
+                company=COMPANIES[company_id]["name"], ideas=cached_ideas
+            )
 
     company = COMPANIES[company_id]
     prompt = IDEAS_PROMPT.format(
@@ -339,6 +353,10 @@ async def get_content_ideas(company_id: str):
             ContentIdea(title=i["title"], description=i["description"])
             for i in ideas_data
         ]
+
+        # Cache the results
+        IDEAS_CACHE[company_id] = (ideas, time.time())
+        logger.info(f"Cached {len(ideas)} ideas for {company_id}")
 
         return IdeasResponse(company=company["name"], ideas=ideas)
 
@@ -452,7 +470,7 @@ TWITTER/X (conversation starter):
 - image_suggestion: Eye-catching visual that complements the tweet
 
 Respond with ONLY valid JSON where each platform has an array of {num_variations} variations:
-{{"instagram":[{{"content":"...","hashtags":[...],"image_suggestion":"..."}},...],"linkedin":[{{"content":"...","hashtags":[...],"image_suggestion":"..."}},...],"twitter":[{{"content":"...","hashtags":[...],"image_suggestion":"..."}},...]}}}"""
+{{"instagram":[{{"content":"...","hashtags":[...],"image_suggestion":"..."}},...],"linkedin":[{{"content":"...","hashtags":[...],"image_suggestion":"..."}},...],"twitter":[{{"content":"...","hashtags":[...],"image_suggestion":"..."}},...]}}"""
 
 
 @app.post("/generate", response_model=GeneratedContent)
