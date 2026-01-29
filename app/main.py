@@ -1,15 +1,30 @@
-import json
-import logging
-import re
-from typing import Literal
+from dotenv import load_dotenv
 
-import ollama
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+load_dotenv()  # Load env vars before other imports that may need them
+
+import json  # noqa: E402
+import logging  # noqa: E402
+import os  # noqa: E402
+import re  # noqa: E402
+from typing import Literal  # noqa: E402
+
+import ollama  # noqa: E402
+import replicate  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- Image Style Presets ---
+IMAGE_STYLES = {
+    "photo": "professional photography, high quality, natural lighting, photorealistic",
+    "illustration": "digital illustration, vector art style, vibrant colors, clean lines",
+    "infographic": "infographic style, data visualization, clean design, minimal text",
+    "minimalist": "minimalist design, clean white background, simple shapes, modern aesthetic",
+    "3d": "3D render, octane render, studio lighting, photorealistic, cinematic",
+}
 
 
 def extract_json(text: str) -> dict:
@@ -121,6 +136,99 @@ async def health():
     return {"status": "healthy"}
 
 
+# --- Image Generation ---
+
+
+class ImageStyle(BaseModel):
+    id: str
+    name: str
+    description: str
+
+
+@app.get("/image-styles", response_model=list[ImageStyle])
+async def get_image_styles():
+    """Get list of available image styles"""
+    style_names = {
+        "photo": "Photo",
+        "illustration": "Illustration",
+        "infographic": "Infographic",
+        "minimalist": "Minimalist",
+        "3d": "3D Render",
+    }
+    return [
+        ImageStyle(id=style_id, name=style_names[style_id], description=desc)
+        for style_id, desc in IMAGE_STYLES.items()
+    ]
+
+
+class GenerateImageRequest(BaseModel):
+    prompt: str
+    style: str = "photo"
+
+
+class GenerateImageResponse(BaseModel):
+    image_url: str
+    prompt_used: str
+
+
+async def generate_image_with_replicate(
+    prompt: str, style: str = "photo"
+) -> str | None:
+    """Generate an image using Replicate's Flux Schnell (free tier friendly)."""
+    if not os.environ.get("REPLICATE_API_TOKEN"):
+        logger.warning("REPLICATE_API_TOKEN not set, skipping image generation")
+        return None
+
+    style_suffix = IMAGE_STYLES.get(style, IMAGE_STYLES["photo"])
+    full_prompt = f"{prompt}, {style_suffix}"
+
+    try:
+        logger.info(f"Generating image with prompt: {full_prompt[:100]}...")
+        # Use Flux Schnell - fast and free tier friendly
+        output = replicate.run(
+            "black-forest-labs/flux-schnell",
+            input={
+                "prompt": full_prompt,
+                "num_outputs": 1,
+                "aspect_ratio": "1:1",
+                "output_format": "webp",
+                "output_quality": 90,
+                "go_fast": True,
+            },
+        )
+        # Output is a list of FileOutput objects
+        if output and len(output) > 0:
+            image_url = str(output[0])
+            logger.info(f"Generated image: {image_url}")
+            return image_url
+        return None
+    except Exception as e:
+        logger.error(f"Error generating image: {e}")
+        return None
+
+
+@app.post("/generate-image", response_model=GenerateImageResponse)
+async def generate_image(request: GenerateImageRequest):
+    """Generate an image using Stable Diffusion via Replicate"""
+    if not os.environ.get("REPLICATE_API_TOKEN"):
+        raise HTTPException(
+            status_code=503,
+            detail="REPLICATE_API_TOKEN not configured. Set it in your environment.",
+        )
+
+    style_suffix = IMAGE_STYLES.get(request.style, IMAGE_STYLES["photo"])
+    full_prompt = f"{request.prompt}, {style_suffix}"
+
+    image_url = await generate_image_with_replicate(request.prompt, request.style)
+    if not image_url:
+        raise HTTPException(
+            status_code=402,
+            detail="Image generation failed. Please add billing credit at https://replicate.com/account/billing",
+        )
+
+    return GenerateImageResponse(image_url=image_url, prompt_used=full_prompt)
+
+
 # --- Company Endpoints ---
 
 
@@ -188,7 +296,7 @@ async def get_content_ideas(company_id: str):
 
     try:
         response = ollama.chat(
-            model="llama3.2",
+            model="llama3.1:8b",
             messages=[{"role": "user", "content": prompt}],
             options={"temperature": 0.8},
         )
@@ -214,6 +322,8 @@ class GenerateRequest(BaseModel):
     company_id: str
     topic: str
     tone: Literal["professional", "casual", "fun"] = "professional"
+    generate_images: bool = False
+    image_style: str = "photo"
 
 
 class PlatformContent(BaseModel):
@@ -221,6 +331,8 @@ class PlatformContent(BaseModel):
     hashtags: list[str]
     char_count: int
     image_suggestion: str = ""  # Description of ideal visual for this post
+    image_url: str | None = None  # URL of generated image
+    image_style: str = "photo"  # Style used for image generation
 
 
 class GeneratedContent(BaseModel):
@@ -274,7 +386,7 @@ async def generate_content(request: GenerateRequest):
         data = None
         for attempt in range(3):
             response = ollama.chat(
-                model="llama3.2",
+                model="llama3.1:8b",
                 messages=[{"role": "user", "content": prompt}],
                 options={
                     "temperature": 0.7 if attempt == 0 else 0.3,
@@ -310,7 +422,11 @@ async def generate_content(request: GenerateRequest):
                 detail=f"Failed to parse LLM response after 3 attempts: {last_error}",
             )
 
-        def build_platform(platform_data: dict) -> PlatformContent:
+        def build_platform(
+            platform_data: dict,
+            image_url: str | None = None,
+            image_style: str = "photo",
+        ) -> PlatformContent:
             content = platform_data.get("content", "")
             hashtags = platform_data.get("hashtags", [])
             image_suggestion = platform_data.get("image_suggestion", "")
@@ -322,15 +438,43 @@ async def generate_content(request: GenerateRequest):
                 hashtags=clean_hashtags,
                 char_count=len(full_text),
                 image_suggestion=image_suggestion,
+                image_url=image_url,
+                image_style=image_style,
             )
+
+        # Generate images if requested
+        image_urls: dict[str, str | None] = {
+            "instagram": None,
+            "linkedin": None,
+            "twitter": None,
+            "tiktok": None,
+        }
+
+        if request.generate_images:
+            logger.info(f"Generating images with style: {request.image_style}")
+            for platform in ["instagram", "linkedin", "twitter", "tiktok"]:
+                image_suggestion = data[platform].get("image_suggestion", "")
+                if image_suggestion:
+                    image_url = await generate_image_with_replicate(
+                        image_suggestion, request.image_style
+                    )
+                    image_urls[platform] = image_url
 
         return GeneratedContent(
             company=company["name"],
             topic=request.topic,
-            instagram=build_platform(data["instagram"]),
-            linkedin=build_platform(data["linkedin"]),
-            twitter=build_platform(data["twitter"]),
-            tiktok=build_platform(data["tiktok"]),
+            instagram=build_platform(
+                data["instagram"], image_urls["instagram"], request.image_style
+            ),
+            linkedin=build_platform(
+                data["linkedin"], image_urls["linkedin"], request.image_style
+            ),
+            twitter=build_platform(
+                data["twitter"], image_urls["twitter"], request.image_style
+            ),
+            tiktok=build_platform(
+                data["tiktok"], image_urls["tiktok"], request.image_style
+            ),
         )
 
     except HTTPException:
