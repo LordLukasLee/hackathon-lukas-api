@@ -355,6 +355,7 @@ class GenerateRequest(BaseModel):
     tone: Literal["professional", "casual", "fun"] = "professional"
     generate_images: bool = False
     image_style: str = "photo"
+    variations: int = 1  # 1-3 variations
 
 
 class PlatformContent(BaseModel):
@@ -369,12 +370,12 @@ class PlatformContent(BaseModel):
 class GeneratedContent(BaseModel):
     company: str
     topic: str
-    instagram: PlatformContent
-    linkedin: PlatformContent
-    twitter: PlatformContent
+    instagram: list[PlatformContent]  # List of variations
+    linkedin: list[PlatformContent]
+    twitter: list[PlatformContent]
 
 
-GENERATE_PROMPT = """You are a social media expert creating content for {company_name}.
+GENERATE_PROMPT_SINGLE = """You are a social media expert creating content for {company_name}.
 
 Company: {company_desc}
 Target Audience: {target_audience}
@@ -411,26 +412,86 @@ TWITTER/X (conversation starter):
 Respond with ONLY valid JSON:
 {{"instagram":{{"content":"...","hashtags":[...],"image_suggestion":"..."}},"linkedin":{{"content":"...","hashtags":[...],"image_suggestion":"..."}},"twitter":{{"content":"...","hashtags":[...],"image_suggestion":"..."}}}}"""
 
+GENERATE_PROMPT_VARIATIONS = """You are a social media expert creating A/B test variations for {company_name}.
+
+Company: {company_desc}
+Target Audience: {target_audience}
+Brand Voice: {voice}
+Topic: "{topic}"
+Tone: {tone}
+
+Generate {num_variations} DISTINCT variations for each platform. Each variation should take a DIFFERENT approach:
+- Version A: Direct/straightforward approach - clear value proposition, professional tone
+- Version B: Creative/unconventional angle - surprising hook, memorable framing
+- Version C: Question-led/engagement-focused - starts with question, invites discussion
+
+PLATFORM REQUIREMENTS:
+
+INSTAGRAM (visual storytelling, broad reach):
+- Start with emoji + bold hook that stops the scroll
+- 2-3 short paragraphs with \\n\\n between them
+- Share value: insight, tip, or story - not just promotion
+- End with engaging question to drive comments
+- Hashtags: Use these branded tags {hashtags_branded} plus 4-5 from {hashtags_industry}
+- image_suggestion: Describe a visually striking image (not generic stock photo vibes)
+
+LINKEDIN (B2B thought leadership):
+- Open with insight, surprising stat, or contrarian take
+- Share expertise and real perspective (sound like a human expert, not a brand)
+- Can use short bullet points for clarity
+- End with question that invites professional discussion
+- Hashtags: 3-4 from {hashtags_industry}
+- image_suggestion: Professional but not boring - data viz, team photo, or product in action
+
+TWITTER/X (conversation starter):
+- Single complete thought - punchy take, question, or insight
+- MUST be self-contained (never "Here are 5 things:" without listing them)
+- Write to spark replies or retweets
+- Under 250 characters including hashtags
+- Hashtags: 1-2 only if they add value
+- image_suggestion: Eye-catching visual that complements the tweet
+
+Respond with ONLY valid JSON where each platform has an array of {num_variations} variations:
+{{"instagram":[{{"content":"...","hashtags":[...],"image_suggestion":"..."}},...],"linkedin":[{{"content":"...","hashtags":[...],"image_suggestion":"..."}},...],"twitter":[{{"content":"...","hashtags":[...],"image_suggestion":"..."}},...]}}}"""
+
 
 @app.post("/generate", response_model=GeneratedContent)
 async def generate_content(request: GenerateRequest):
-    """Generate social media content for 4 platforms using local Ollama"""
+    """Generate social media content for 3 platforms using local Ollama"""
     if request.company_id not in COMPANIES:
         raise HTTPException(
             status_code=404, detail=f"Company '{request.company_id}' not found"
         )
 
+    # Clamp variations to 1-3
+    num_variations = max(1, min(3, request.variations))
+
     company = COMPANIES[request.company_id]
-    prompt = GENERATE_PROMPT.format(
-        company_name=company["name"],
-        company_desc=company["description"],
-        target_audience=company["target_audience"],
-        voice=company["voice"],
-        topic=request.topic,
-        tone=request.tone,
-        hashtags_branded=company["hashtags_branded"],
-        hashtags_industry=company["hashtags_industry"],
-    )
+
+    # Use single or variations prompt based on request
+    if num_variations == 1:
+        prompt = GENERATE_PROMPT_SINGLE.format(
+            company_name=company["name"],
+            company_desc=company["description"],
+            target_audience=company["target_audience"],
+            voice=company["voice"],
+            topic=request.topic,
+            tone=request.tone,
+            hashtags_branded=company["hashtags_branded"],
+            hashtags_industry=company["hashtags_industry"],
+        )
+    else:
+        prompt = GENERATE_PROMPT_VARIATIONS.format(
+            company_name=company["name"],
+            company_desc=company["description"],
+            target_audience=company["target_audience"],
+            voice=company["voice"],
+            topic=request.topic,
+            tone=request.tone,
+            hashtags_branded=company["hashtags_branded"],
+            hashtags_industry=company["hashtags_industry"],
+            num_variations=num_variations,
+        )
 
     try:
         # Try up to 3 times in case of JSON parsing issues
@@ -443,7 +504,7 @@ async def generate_content(request: GenerateRequest):
                 messages=[{"role": "user", "content": prompt}],
                 options={
                     "temperature": 0.7 if attempt == 0 else 0.3,
-                    "num_predict": 8000,  # Ensure enough tokens for full response
+                    "num_predict": 16000,  # More tokens for variations
                 },
             )
             response_text = response["message"]["content"]
@@ -457,10 +518,27 @@ async def generate_content(request: GenerateRequest):
                 for platform in ["instagram", "linkedin", "twitter"]:
                     if platform not in data:
                         raise ValueError(f"Missing platform: {platform}")
-                    if "content" not in data[platform]:
-                        raise ValueError(f"Missing content for {platform}")
-                    if "hashtags" not in data[platform]:
-                        data[platform]["hashtags"] = []  # Default to empty
+
+                    # Normalize to list format
+                    if num_variations == 1:
+                        # Single variation - wrap in list if not already
+                        if isinstance(data[platform], dict):
+                            data[platform] = [data[platform]]
+                    else:
+                        # Multiple variations - ensure it's a list
+                        if not isinstance(data[platform], list):
+                            raise ValueError(
+                                f"Expected list for {platform}, got {type(data[platform])}"
+                            )
+
+                    # Validate each variation has content
+                    for i, variation in enumerate(data[platform]):
+                        if "content" not in variation:
+                            raise ValueError(
+                                f"Missing content for {platform} variation {i}"
+                            )
+                        if "hashtags" not in variation:
+                            variation["hashtags"] = []
                 break
             except (json.JSONDecodeError, ValueError, KeyError) as e:
                 logger.warning(f"Attempt {attempt + 1} failed: {e}")
@@ -495,35 +573,37 @@ async def generate_content(request: GenerateRequest):
                 image_style=image_style,
             )
 
-        # Generate images if requested
-        image_urls: dict[str, str | None] = {
-            "instagram": None,
-            "linkedin": None,
-            "twitter": None,
+        # Build variations for each platform
+        result: dict[str, list[PlatformContent]] = {
+            "instagram": [],
+            "linkedin": [],
+            "twitter": [],
         }
 
-        if request.generate_images:
-            logger.info(f"Generating images with style: {request.image_style}")
-            for platform in ["instagram", "linkedin", "twitter"]:
-                image_suggestion = data[platform].get("image_suggestion", "")
-                if image_suggestion:
-                    image_url = await generate_image_with_pollinations(
-                        image_suggestion, request.image_style
-                    )
-                    image_urls[platform] = image_url
+        for platform in ["instagram", "linkedin", "twitter"]:
+            for i, variation_data in enumerate(data[platform]):
+                # Generate image if requested (only for first variation to save time)
+                image_url = None
+                if request.generate_images and i == 0:
+                    image_suggestion = variation_data.get("image_suggestion", "")
+                    if image_suggestion:
+                        logger.info(
+                            f"Generating image for {platform} with style: {request.image_style}"
+                        )
+                        image_url = await generate_image_with_pollinations(
+                            image_suggestion, request.image_style
+                        )
+
+                result[platform].append(
+                    build_platform(variation_data, image_url, request.image_style)
+                )
 
         return GeneratedContent(
             company=company["name"],
             topic=request.topic,
-            instagram=build_platform(
-                data["instagram"], image_urls["instagram"], request.image_style
-            ),
-            linkedin=build_platform(
-                data["linkedin"], image_urls["linkedin"], request.image_style
-            ),
-            twitter=build_platform(
-                data["twitter"], image_urls["twitter"], request.image_style
-            ),
+            instagram=result["instagram"],
+            linkedin=result["linkedin"],
+            twitter=result["twitter"],
         )
 
     except HTTPException:
