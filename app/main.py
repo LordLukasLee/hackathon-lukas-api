@@ -6,10 +6,10 @@ import json  # noqa: E402
 import logging  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import urllib.parse  # noqa: E402
 from typing import Literal  # noqa: E402
 
 import ollama  # noqa: E402
-import replicate  # noqa: E402
 from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -81,46 +81,87 @@ app.add_middleware(
 COMPANIES = {
     "ombori": {
         "name": "Ombori",
-        "description": "Retail technology pioneer founded by Andreas Hassellöf. Creates smart store solutions including IoT, digital signage, queue management, and interactive displays. Partners with Microsoft and serves major retailers like H&M.",
-        "topics": [
-            "retail innovation",
-            "customer experience",
-            "smart stores",
-            "digital transformation",
-            "IoT",
+        "description": "Retail technology pioneer founded by Andreas Hassellöf. Creator of the Ombori Grid platform that powers digital experiences in physical spaces. Microsoft Azure partner featured by Satya Nadella. Serves major retailers including H&M, Dufry, Target Australia, and Lindt. Recently launched StoreAI for AI-powered in-store experiences.",
+        "target_audience": "Retail executives, CIOs, store operations directors at mid-to-large retailers looking to digitally transform their physical stores",
+        "voice": "Visionary yet proven. We've delivered results for the world's biggest retailers. Practical innovation, not hype.",
+        "content_themes": [
+            "Customer experience transformation",
+            "ROI of smart store technology",
+            "Retail innovation trends",
+            "Case studies from H&M, Dufry, etc.",
+            "StoreAI and the future of retail",
+        ],
+        "hashtags_branded": ["Ombori", "OmboriGrid", "StoreAI"],
+        "hashtags_industry": [
+            "RetailTech",
+            "SmartStores",
+            "RetailInnovation",
+            "DigitalTransformation",
+            "CustomerExperience",
         ],
     },
     "phygrid": {
         "name": "Phygrid",
-        "description": "The Store Digitalization Standard - edge AI infrastructure for retail deployed in 50+ countries. Offers self-checkout, smart fitting rooms, scan & go, endless aisle, and digital signage solutions.",
-        "topics": [
-            "self-checkout",
-            "smart fitting rooms",
-            "retail AI",
-            "store digitalization",
-            "edge computing",
+        "description": "The Store Digitalization Standard - edge AI infrastructure deployed by retailers in 50+ countries. Partners with Microsoft Azure and VoiceComm to support 52,000+ retail locations. Complete suite including self-checkout, smart fitting rooms, endless aisle, scan & go, queue management, and digital signage.",
+        "target_audience": "Retail IT leaders, operations managers, and innovation teams seeking proven, scalable store digitalization solutions",
+        "voice": "The industry standard. Trusted globally. We make complex technology simple to deploy and manage.",
+        "content_themes": [
+            "Self-checkout best practices",
+            "Smart fitting room ROI",
+            "Edge AI in retail",
+            "Global deployment success stories",
+            "Operational efficiency gains",
+        ],
+        "hashtags_branded": ["Phygrid", "StoreDigitalization"],
+        "hashtags_industry": [
+            "SelfCheckout",
+            "RetailAI",
+            "EdgeComputing",
+            "SmartRetail",
+            "RetailOperations",
         ],
     },
     "phystack": {
         "name": "Phystack",
-        "description": "Edge AI infrastructure platform powering physical-world applications. One platform for everything physical in digital spaces - from screens to drones, managing devices, apps, and real-world analytics globally.",
-        "topics": [
-            "edge AI",
-            "physical AI",
-            "IoT infrastructure",
-            "real-world analytics",
-            "developer platform",
+        "description": "Edge-native infrastructure platform powering the real-world AI revolution. Provides SDK, APIs, and edge intelligence tools for developers building physical-world applications. The foundation that powers Phygrid and enables physical AI across industries.",
+        "target_audience": "Developers, CTOs, and technical architects building edge AI and physical-world applications",
+        "voice": "Developer-first. We built the infrastructure so you can focus on your application. Technical depth with practical simplicity.",
+        "content_themes": [
+            "Edge AI development tutorials",
+            "Physical AI use cases",
+            "Developer tools and SDK updates",
+            "Edge vs cloud architecture",
+            "Building real-world AI applications",
+        ],
+        "hashtags_branded": ["Phystack", "PhysicalAI"],
+        "hashtags_industry": [
+            "EdgeAI",
+            "EdgeComputing",
+            "DevTools",
+            "IoT",
+            "AIInfrastructure",
         ],
     },
     "fendops": {
         "name": "Fendops",
-        "description": "Technology integration and enablement services helping organizations with Microsoft Teams, Slack, Zoom, ERP, CRM, and HR systems. Specializes in change management and business process integration.",
-        "topics": [
-            "digital workplace",
-            "enterprise integration",
-            "change management",
-            "collaboration tools",
-            "business transformation",
+        "description": "IT operations and security services for fintech and financial institutions. Part of the Ombori Group. Specializes in transaction security, PCI DSS/FFIEC compliance, and third-party risk management. Helps financial services companies protect sensitive data and maintain regulatory compliance.",
+        "target_audience": "CISOs, IT security leaders, compliance officers at fintech companies and financial institutions",
+        "voice": "Security expertise you can trust. We understand the regulatory landscape and the real threats facing financial services.",
+        "content_themes": [
+            "Fintech security best practices",
+            "PCI DSS compliance tips",
+            "Third-party risk management",
+            "Transaction security trends",
+            "Regulatory compliance updates",
+        ],
+        "hashtags_branded": ["Fendops"],
+        "hashtags_industry": [
+            "Fintech",
+            "CyberSecurity",
+            "Compliance",
+            "PCIDSS",
+            "FinancialServices",
+            "InfoSec",
         ],
     },
 }
@@ -171,37 +212,28 @@ class GenerateImageResponse(BaseModel):
     prompt_used: str
 
 
-async def generate_image_with_replicate(
+async def generate_image_with_pollinations(
     prompt: str, style: str = "photo"
 ) -> str | None:
-    """Generate an image using Replicate's Flux Schnell (free tier friendly)."""
-    if not os.environ.get("REPLICATE_API_TOKEN"):
-        logger.warning("REPLICATE_API_TOKEN not set, skipping image generation")
-        return None
-
+    """Generate an image using Pollinations API."""
     style_suffix = IMAGE_STYLES.get(style, IMAGE_STYLES["photo"])
     full_prompt = f"{prompt}, {style_suffix}"
 
     try:
         logger.info(f"Generating image with prompt: {full_prompt[:100]}...")
-        # Use Flux Schnell - fast and free tier friendly
-        output = replicate.run(
-            "black-forest-labs/flux-schnell",
-            input={
-                "prompt": full_prompt,
-                "num_outputs": 1,
-                "aspect_ratio": "1:1",
-                "output_format": "webp",
-                "output_quality": 90,
-                "go_fast": True,
-            },
-        )
-        # Output is a list of FileOutput objects
-        if output and len(output) > 0:
-            image_url = str(output[0])
-            logger.info(f"Generated image: {image_url}")
-            return image_url
-        return None
+
+        # Pollinations API - URL encode the prompt and add API key if available
+        encoded_prompt = urllib.parse.quote(full_prompt)
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+
+        # Add API key for no rate limits
+        api_key = os.getenv("POLLINATIONS_API_KEY")
+        if api_key:
+            image_url = f"{image_url}?key={api_key}"
+            logger.info("Using Pollinations API key for authenticated request")
+
+        logger.info(f"Generated image URL: {image_url[:100]}...")
+        return image_url
     except Exception as e:
         logger.error(f"Error generating image: {e}")
         return None
@@ -209,21 +241,15 @@ async def generate_image_with_replicate(
 
 @app.post("/generate-image", response_model=GenerateImageResponse)
 async def generate_image(request: GenerateImageRequest):
-    """Generate an image using Stable Diffusion via Replicate"""
-    if not os.environ.get("REPLICATE_API_TOKEN"):
-        raise HTTPException(
-            status_code=503,
-            detail="REPLICATE_API_TOKEN not configured. Set it in your environment.",
-        )
-
+    """Generate an image using Pollinations API (free)"""
     style_suffix = IMAGE_STYLES.get(request.style, IMAGE_STYLES["photo"])
     full_prompt = f"{request.prompt}, {style_suffix}"
 
-    image_url = await generate_image_with_replicate(request.prompt, request.style)
+    image_url = await generate_image_with_pollinations(request.prompt, request.style)
     if not image_url:
         raise HTTPException(
-            status_code=402,
-            detail="Image generation failed. Please add billing credit at https://replicate.com/account/billing",
+            status_code=500,
+            detail="Image generation failed",
         )
 
     return GenerateImageResponse(image_url=image_url, prompt_used=full_prompt)
@@ -263,24 +289,25 @@ class IdeasResponse(BaseModel):
 IDEAS_PROMPT = """You are a senior social media strategist for {company_name}.
 
 Company: {company_desc}
+Target Audience: {target_audience}
+Brand Voice: {voice}
+Content Themes: {content_themes}
 
-Generate 5 specific, actionable content ideas. Each idea should be something they could post TODAY - not vague concepts but concrete topics with a clear angle.
+Generate 5 specific, actionable content ideas that would resonate with our target audience. Each idea should be something we could post TODAY.
 
-Good examples:
-- "How we reduced checkout times by 40% at [major retailer]" (specific case study)
-- "3 things I wish I knew before implementing self-checkout" (listicle with insider tips)
-- "The hidden cost of long checkout lines (and how to fix it)" (problem-solution)
+Content types that perform well for B2B:
+- Customer success metrics ("How [client type] achieved X% improvement...")
+- Contrarian takes on industry trends
+- Behind-the-scenes of technology/process
+- Problem → Solution stories from our expertise
+- Industry data with our unique perspective
 
-Bad examples (too vague):
-- "The future of retail" (too broad)
-- "Innovation in technology" (no angle)
-
-For each idea, provide:
-- title: A specific, scroll-stopping headline (not generic)
-- description: What the post will cover and why it's interesting
+Each idea needs:
+- title: Specific, scroll-stopping headline (not generic clickbait)
+- description: The angle, key points to cover, and why our audience cares
 
 IMPORTANT: Respond ONLY with valid JSON array. No markdown, no code blocks:
-[{{"title": "specific headline", "description": "what this post covers and the angle"}}]"""
+[{{"title": "specific headline", "description": "angle and key points"}}]"""
 
 
 @app.get("/ideas/{company_id}", response_model=IdeasResponse)
@@ -291,7 +318,11 @@ async def get_content_ideas(company_id: str):
 
     company = COMPANIES[company_id]
     prompt = IDEAS_PROMPT.format(
-        company_name=company["name"], company_desc=company["description"]
+        company_name=company["name"],
+        company_desc=company["description"],
+        target_audience=company["target_audience"],
+        voice=company["voice"],
+        content_themes=", ".join(company["content_themes"]),
     )
 
     try:
@@ -341,26 +372,44 @@ class GeneratedContent(BaseModel):
     instagram: PlatformContent
     linkedin: PlatformContent
     twitter: PlatformContent
-    tiktok: PlatformContent
 
 
-GENERATE_PROMPT = """You are a JSON API. You MUST respond with ONLY a JSON object, nothing else. No explanations, no markdown.
+GENERATE_PROMPT = """You are a social media expert creating content for {company_name}.
 
-Task: Create social media posts for {company_name} about "{topic}" in {tone} tone.
-Company info: {company_desc}
+Company: {company_desc}
+Target Audience: {target_audience}
+Brand Voice: {voice}
+Topic: "{topic}"
+Tone: {tone}
 
-IMPORTANT: Use \\n\\n between paragraphs in content strings for visual spacing.
+PLATFORM REQUIREMENTS:
 
-Requirements per platform:
-- instagram: 150-250 words, emoji hook, 2-3 paragraphs separated by \\n\\n, question at end, 6-8 hashtags
-- linkedin: 150-250 words, professional insight, 2-3 paragraphs separated by \\n\\n, question at end, 3-4 hashtags
-- twitter: under 250 chars total, punchy, 1-2 hashtags
-- tiktok: 30-60 words, POV: or hook format, \\n\\n after hook, 4-5 hashtags with #fyp
+INSTAGRAM (visual storytelling, broad reach):
+- Start with emoji + bold hook that stops the scroll
+- 2-3 short paragraphs with \\n\\n between them
+- Share value: insight, tip, or story - not just promotion
+- End with engaging question to drive comments
+- Hashtags: Use these branded tags {hashtags_branded} plus 4-5 from {hashtags_industry}
+- image_suggestion: Describe a visually striking image (not generic stock photo vibes)
 
-Each platform needs: content (string), hashtags (array), image_suggestion (string describing ideal photo/visual)
+LINKEDIN (B2B thought leadership):
+- Open with insight, surprising stat, or contrarian take
+- Share expertise and real perspective (sound like a human expert, not a brand)
+- Can use short bullet points for clarity
+- End with question that invites professional discussion
+- Hashtags: 3-4 from {hashtags_industry}
+- image_suggestion: Professional but not boring - data viz, team photo, or product in action
 
-YOUR RESPONSE MUST BE EXACTLY THIS FORMAT (valid JSON only, no other text):
-{{"instagram":{{"content":"emoji hook\\n\\nparagraph1\\n\\nparagraph2\\n\\nquestion?","hashtags":["tag1","tag2"],"image_suggestion":"describe ideal photo"}},"linkedin":{{"content":"hook\\n\\nparagraph1\\n\\nparagraph2\\n\\nquestion?","hashtags":["tag1"],"image_suggestion":"describe ideal graphic"}},"twitter":{{"content":"your tweet","hashtags":["tag1"],"image_suggestion":"describe visual"}},"tiktok":{{"content":"POV: hook\\n\\ncaption","hashtags":["fyp","tag1"],"image_suggestion":"describe video idea"}}}}"""
+TWITTER/X (conversation starter):
+- Single complete thought - punchy take, question, or insight
+- MUST be self-contained (never "Here are 5 things:" without listing them)
+- Write to spark replies or retweets
+- Under 250 characters including hashtags
+- Hashtags: 1-2 only if they add value
+- image_suggestion: Eye-catching visual that complements the tweet
+
+Respond with ONLY valid JSON:
+{{"instagram":{{"content":"...","hashtags":[...],"image_suggestion":"..."}},"linkedin":{{"content":"...","hashtags":[...],"image_suggestion":"..."}},"twitter":{{"content":"...","hashtags":[...],"image_suggestion":"..."}}}}"""
 
 
 @app.post("/generate", response_model=GeneratedContent)
@@ -375,8 +424,12 @@ async def generate_content(request: GenerateRequest):
     prompt = GENERATE_PROMPT.format(
         company_name=company["name"],
         company_desc=company["description"],
+        target_audience=company["target_audience"],
+        voice=company["voice"],
         topic=request.topic,
         tone=request.tone,
+        hashtags_branded=company["hashtags_branded"],
+        hashtags_industry=company["hashtags_industry"],
     )
 
     try:
@@ -401,7 +454,7 @@ async def generate_content(request: GenerateRequest):
             try:
                 data = extract_json(response_text)
                 # Validate required keys exist
-                for platform in ["instagram", "linkedin", "twitter", "tiktok"]:
+                for platform in ["instagram", "linkedin", "twitter"]:
                     if platform not in data:
                         raise ValueError(f"Missing platform: {platform}")
                     if "content" not in data[platform]:
@@ -447,15 +500,14 @@ async def generate_content(request: GenerateRequest):
             "instagram": None,
             "linkedin": None,
             "twitter": None,
-            "tiktok": None,
         }
 
         if request.generate_images:
             logger.info(f"Generating images with style: {request.image_style}")
-            for platform in ["instagram", "linkedin", "twitter", "tiktok"]:
+            for platform in ["instagram", "linkedin", "twitter"]:
                 image_suggestion = data[platform].get("image_suggestion", "")
                 if image_suggestion:
-                    image_url = await generate_image_with_replicate(
+                    image_url = await generate_image_with_pollinations(
                         image_suggestion, request.image_style
                     )
                     image_urls[platform] = image_url
@@ -471,9 +523,6 @@ async def generate_content(request: GenerateRequest):
             ),
             twitter=build_platform(
                 data["twitter"], image_urls["twitter"], request.image_style
-            ),
-            tiktok=build_platform(
-                data["tiktok"], image_urls["tiktok"], request.image_style
             ),
         )
 
